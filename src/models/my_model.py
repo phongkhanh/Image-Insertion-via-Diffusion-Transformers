@@ -1,3 +1,6 @@
+import os
+from typing import Optional
+
 import lightning as L
 from diffusers.pipelines import FluxFillPipeline, FluxPriorReduxPipeline
 import torch
@@ -5,6 +8,7 @@ from peft import LoraConfig, get_peft_model_state_dict
 
 import prodigyopt
 from PIL import Image
+from .harmonizer import MultiStageHarmonizer
 from .transformer import tranformer_forward
 from .pipeline_tools import encode_images, prepare_text_input, Flux_fill_encode_masks_images
 from .image_project import image_output
@@ -52,6 +56,39 @@ class InsertAnything(L.LightningModule):
         # Initialize LoRA layers
         self.lora_layers = self.init_lora(lora_path, lora_config)
 
+        # ── Scene-Aware Reference Harmonizer ─────────────────────────────────
+        # Instantiated AFTER init_lora so PEFT's add_adapter() cannot
+        # accidentally wrap any of the harmonizer's linear layers.
+        # Instantiated BEFORE self.to(device).to(dtype) so it is moved
+        # automatically along with the rest of the LightningModule.
+        #
+        # When use_scene_harmonizer is False the attribute is set to None and
+        # every downstream call site is a zero-cost no-op.
+        if self.model_config.get("use_scene_harmonizer", False):
+            self.harmonizer: Optional[MultiStageHarmonizer] = MultiStageHarmonizer(
+                hidden_dim=3072,
+                num_heads=24,
+                head_dim=128,
+            )
+        else:
+            self.harmonizer: Optional[MultiStageHarmonizer] = None
+
+        # ── Harmonizer trainability report (runs once at init) ────────────────
+        # Printed before self.to(dtype) so values reflect float32 init state.
+        # requires_grad is unaffected by dtype conversion.
+        if self.harmonizer is not None:
+            total_params = sum(p.numel() for p in self.harmonizer.parameters())
+            print("[Harmonizer V3 Init]")
+            print(f"  inject_at={self.harmonizer.inject_at}")
+            print(f"  params={total_params}")
+            print(f"  alpha_0={self.harmonizer.alpha_0.item():.1f}")
+            print(f"  alpha_1={self.harmonizer.alpha_1.item():.1f}")
+            print(f"  alpha_2={self.harmonizer.alpha_2.item():.1f}")
+            print(f"  diag_gamma_norm={self.harmonizer.diag_gamma.norm().item():.1f}")
+            print(f"  diag_beta_norm={self.harmonizer.diag_beta.norm().item():.1f}")
+            for name, param in self.harmonizer.named_parameters():
+                print(f"  {name}.requires_grad={param.requires_grad}")
+
         self.to(device).to(dtype)
 
     def init_lora(self, lora_path: str, lora_config: dict):
@@ -74,12 +111,65 @@ class InsertAnything(L.LightningModule):
             safe_serialization=True,
         )
 
+    def save_harmonizer(self, path: str) -> None:
+        """Save MultiStageHarmonizer weights to <path>/harmonizer.pt.
+
+        Safe to call when use_scene_harmonizer is False — becomes a no-op.
+        Does not affect LoRA weights or the FluxFillPipeline state dict.
+
+        Args:
+            path: Directory where harmonizer.pt will be written.
+                  Created automatically if it does not exist.
+        """
+        if self.harmonizer is None:
+            return
+        os.makedirs(path, exist_ok=True)
+        save_path = os.path.join(path, "harmonizer.pt")
+        torch.save(self.harmonizer.state_dict(), save_path)
+
+    def load_harmonizer(self, path: str) -> None:
+        """Load MultiStageHarmonizer weights from <path>/harmonizer.pt.
+
+        Must be called after InsertAnything is constructed with
+        use_scene_harmonizer: true.  Raises RuntimeError if the harmonizer
+        was not initialized (i.e., config flag is False).
+
+        Args:
+            path: Directory that contains harmonizer.pt.
+        """
+        if self.harmonizer is None:
+            raise RuntimeError(
+                "Cannot load harmonizer weights: harmonizer is not initialized. "
+                "Set model.use_scene_harmonizer: true in the config before "
+                "constructing InsertAnything."
+            )
+        ckpt_path = os.path.join(path, "harmonizer.pt")
+        if not os.path.isfile(ckpt_path):
+            raise FileNotFoundError(
+                f"harmonizer.pt not found at '{ckpt_path}'. "
+                "Verify that the checkpoint directory contains a harmonizer.pt file."
+            )
+        state = torch.load(ckpt_path, map_location=self.device)
+        # strict=False: V2 checkpoints (no diag_gamma/diag_beta) load cleanly.
+        self.harmonizer.load_state_dict(state, strict=False)
+        self.harmonizer.to(device=self.device, dtype=self.dtype)
+
     def configure_optimizers(self):
         # Freeze the transformer
         self.transformer.requires_grad_(False)
         opt_config = self.optimizer_config
 
+        # LoRA parameters (re-enabled below).
         self.trainable_params = self.lora_layers
+
+        # Harmonizer parameters are full (non-LoRA) trainable weights.
+        # They live outside self.transformer so requires_grad_(False) above
+        # did not touch them.  We still add them explicitly so the optimizer
+        # receives them.
+        if self.harmonizer is not None:
+            self.trainable_params = (
+                self.trainable_params + list(self.harmonizer.parameters())
+            )
 
         # Unfreeze trainable parameters
         for p in self.trainable_params:
@@ -175,8 +265,9 @@ class InsertAnything(L.LightningModule):
         # Forward pass
         transformer_out = tranformer_forward(
             self.transformer,
-            # Model config
             model_config=self.model_config,
+            # Pass harmonizer (None when use_scene_harmonizer: false → no-op).
+            harmonizer=self.harmonizer,
             hidden_states=torch.cat((x_t, condition_latents), dim=2),
             timestep=t,
             guidance=guidance,

@@ -13,6 +13,48 @@ from diffusers.models.transformers.transformer_flux import (
 import numpy as np
 from diffusers.utils.import_utils import is_torch_version
 
+def build_inference_forward(
+    transformer: FluxTransformer2DModel,
+    harmonizer=None,
+):
+    """Return a forward callable that injects MultiStageHarmonizer into the
+    standard FluxTransformer2DModel denoising pass.
+
+    Assign the result to pipe.transformer.forward AFTER loading LoRA weights:
+
+        pipe.load_lora_weights(ckpt_dir)
+        pipe.transformer.forward = build_inference_forward(
+            pipe.transformer, harmonizer
+        )
+
+    The returned function accepts the same keyword arguments as
+    FluxTransformer2DModel.forward() and produces identical output shapes.
+    The harmonizer is applied after dual blocks 6, 12, and 18, reproducing
+    the V2 training tensor path:
+
+        x_embedder → context_embedder → dual blocks × 19
+            [harmonize after 6, 12, 18] → single blocks × 38 → proj_out
+
+    When harmonizer is None the function behaves identically to the
+    unpatched FluxTransformer2DModel.forward().
+
+    Args:
+        transformer: The FluxTransformer2DModel instance (pipe.transformer).
+        harmonizer:  Loaded MultiStageHarmonizer in eval mode, or None.
+
+    Returns:
+        Callable suitable for direct assignment to transformer.forward.
+    """
+    def _forward(**kwargs):
+        return tranformer_forward(
+            transformer,
+            model_config={},
+            harmonizer=harmonizer,
+            **kwargs,
+        )
+    return _forward
+
+
 def prepare_params(
     hidden_states: torch.Tensor,
     encoder_hidden_states: torch.Tensor = None,
@@ -46,6 +88,7 @@ def tranformer_forward(
     transformer: FluxTransformer2DModel,
     model_config: Optional[Dict[str, Any]] = {},
     c_t=0,
+    harmonizer=None,
     **params: dict,
 ):
     self = transformer
@@ -142,6 +185,18 @@ def tranformer_forward(
                 encoder_hidden_states=encoder_hidden_states,
                 temb=temb,
                 image_rotary_emb=image_rotary_emb,
+            )
+
+        # ── Multi-stage harmonization (V2) ────────────────────────────
+        # Applied after dual blocks 6, 12, and 18.  Reference tokens (Q)
+        # attend over scene tokens (K, V) with shared projections and
+        # per-stage learnable gates.  No-op when harmonizer is None.
+        if harmonizer is not None and index_block in harmonizer.inject_at:
+            stage = harmonizer.inject_at.index(index_block)
+            encoder_hidden_states = harmonizer(
+                encoder_hidden_states=encoder_hidden_states,
+                hidden_states=hidden_states,
+                stage=stage,
             )
 
         # controlnet residual

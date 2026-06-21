@@ -35,17 +35,22 @@ def main():
     if is_main_process:
         print("Config:", config)
 
+    max_samples = training_config.get("max_samples_per_category", None)
+
     accessory_train = AllDataset(
-        image_dir="data/train/accessory",
+        image_dir="/data1/stage/navsim_workspace/AnyInsertion/data_training_mask_prompt/train/accessory",
+        max_samples=max_samples,
     )
 
     object_train = AllDataset(
-        image_dir="data/train/object",
+        image_dir="/data1/stage/navsim_workspace/AnyInsertion/data_training_mask_prompt/train/object",
+        max_samples=max_samples,
     )
 
     person_train = AllDataset(
-        image_dir="data/train/person",
-        data_type="person"
+        image_dir="/data1/stage/navsim_workspace/AnyInsertion/data_training_mask_prompt/train/person",
+        data_type="person",
+        max_samples=max_samples,
     )
 
     train_dataset = accessory_train + person_train + object_train

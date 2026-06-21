@@ -1,7 +1,5 @@
 import os
 import sys
-import base64
-from io import BytesIO
 import cv2
 import numpy as np
 import torch
@@ -99,31 +97,6 @@ image_mask_list.sort()
 ###   example  #####
 
 
-
-
-def _pil_to_b64(img):
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
-
-
-def make_comparison_html(before_pil, after_pil):
-    b = _pil_to_b64(before_pil)
-    a = _pil_to_b64(after_pil)
-    return f"""
-    <div style="position:relative;width:100%;display:inline-block;user-select:none;border-radius:8px;overflow:hidden;">
-      <img src="data:image/png;base64,{b}" style="width:100%;display:block;">
-      <img src="data:image/png;base64,{a}"
-           style="position:absolute;top:0;left:0;width:100%;clip-path:inset(0 50% 0 0);">
-      <div style="position:absolute;top:0;bottom:0;left:50%;width:3px;background:rgba(255,255,255,0.85);pointer-events:none;">
-        <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:white;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:14px;box-shadow:0 2px 6px rgba(0,0,0,0.4);">⇔</div>
-      </div>
-      <input type="range" min="0" max="100" value="50"
-             style="position:absolute;width:100%;height:100%;top:0;left:0;opacity:0;cursor:ew-resize;margin:0;padding:0;"
-             oninput="var v=this.value,e=this.parentElement.children;e[1].style.clipPath='inset(0 '+(100-v)+'% 0 0)';e[2].style.left=v+'%';">
-    </div>
-    <p style="text-align:center;color:#888;font-size:12px;margin-top:4px;">← Before &nbsp;|&nbsp; After →</p>
-    """
 
 
 def _empty_bbox():
@@ -326,11 +299,11 @@ def run_local(base_image, base_mask, reference_image, ref_mask, base_mask_option
 
 
     edited_image = np.array(edited_image)
-    edited_image = crop_back(edited_image, old_tar_image, np.array([H1, W1, H2, W2]), np.array(tar_box_yyxx_crop))
+    edited_image = crop_back(edited_image, old_tar_image, np.array([H1, W1, H2, W2]), np.array(tar_box_yyxx_crop)) 
     edited_image = Image.fromarray(edited_image)
-    original_image = Image.fromarray(old_tar_image)
 
-    return [edited_image], make_comparison_html(original_image, edited_image)
+
+    return [edited_image]
 
 with gr.Blocks() as demo:
 
@@ -401,8 +374,7 @@ with gr.Blocks() as demo:
         with gr.Column(scale=1):
             baseline_gallery = gr.Gallery(
                 label='Output', show_label=True, elem_id="gallery",
-                height=400, columns=1, object_fit="contain")
-            comparison_slider = gr.HTML(label="Before / After")
+                height=701, columns=1, object_fit="contain")
             with gr.Accordion("Advanced Option", open=True):
                 gr.Markdown("---")
                 gr.Markdown("### Model")
@@ -505,7 +477,7 @@ with gr.Blocks() as demo:
         inputs=[base_image, base_mask, ref_image, ref_mask,
                 base_mask_option, ref_mask_option,
                 bg_sam_mask_state, ref_sam_mask_state],
-        outputs=[baseline_gallery, comparison_slider])
+        outputs=[baseline_gallery])
 
 demo.queue()
 demo.launch(share=True)

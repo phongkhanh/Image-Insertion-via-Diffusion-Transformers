@@ -158,6 +158,12 @@ class TrainingCallback(L.Callback):
 
         self.total_steps = 0
 
+    def on_train_end(self, trainer, pl_module):
+        print(f"Training finished. Steps: {self.total_steps} - Saving final LoRA weights")
+        ckpt_dir = f"{self.save_path}/{self.run_name}/ckpt/final"
+        pl_module.save_lora(ckpt_dir)
+        pl_module.save_harmonizer(ckpt_dir)
+
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         gradient_size = 0
         max_gradient_size = 0
@@ -190,14 +196,72 @@ class TrainingCallback(L.Callback):
                 f"Epoch: {trainer.current_epoch}, Steps: {self.total_steps}, Batch: {batch_idx}, Loss: {pl_module.log_loss:.4f}, Gradient size: {gradient_size:.4f}, Max gradient size: {max_gradient_size:.4f}"
             )
 
-        # Save LoRA weights at specified intervals
+        # ── Harmonizer alpha logging (every 100 steps) ───────────────────────
+        # Tracks whether each stage gate is opening during training.
+        # Uses wandb when available; always prints the [Harmonizer] prefix line.
+        if pl_module.harmonizer is not None and self.total_steps % 100 == 0:
+            a0 = pl_module.harmonizer.alpha_0.item()
+            a1 = pl_module.harmonizer.alpha_1.item()
+            a2 = pl_module.harmonizer.alpha_2.item()
+            d0, d1, d2 = pl_module.harmonizer._delta_mag  # plain Python floats
+
+            # V3 FiLM parameter norms (mean absolute value across channels).
+            dg_mean = pl_module.harmonizer.diag_gamma.detach().abs().mean().item()
+            db_mean = pl_module.harmonizer.diag_beta.detach().abs().mean().item()
+
+            if self.use_wandb:
+                wandb.log({
+                    "harmonizer_alpha_0": a0,
+                    "harmonizer_alpha_1": a1,
+                    "harmonizer_alpha_2": a2,
+                    "harmonizer_delta_stage0": d0,
+                    "harmonizer_delta_stage1": d1,
+                    "harmonizer_delta_stage2": d2,
+                    "harmonizer_diag_gamma_mean_abs": dg_mean,
+                    "harmonizer_diag_beta_mean_abs": db_mean,
+                    "steps": self.total_steps,
+                })
+
+            print(
+                f"[Harmonizer]\n"
+                f"alpha_0={a0:.6f}\n"
+                f"alpha_1={a1:.6f}\n"
+                f"alpha_2={a2:.6f}\n"
+                f"\n"
+                f"[Harmonizer Delta]\n"
+                f"stage0={d0:.6f}\n"
+                f"stage1={d1:.6f}\n"
+                f"stage2={d2:.6f}\n"
+                f"\n"
+                f"[Harmonizer FiLM]\n"
+                f"diag_gamma_mean_abs={dg_mean:.6f}\n"
+                f"diag_beta_mean_abs={db_mean:.6f}"
+            )
+
+        # ── Harmonizer gradient monitoring (every 500 steps) ─────────────────
+        # Reports mean absolute gradient for each shared projection weight.
+        # Only prints when .grad tensors exist (i.e., after the first backward).
+        if pl_module.harmonizer is not None and self.total_steps % 500 == 0:
+            proj_names = ("q_proj", "k_proj", "v_proj", "out_proj")
+            grad_lines = []
+            for name in proj_names:
+                weight = getattr(pl_module.harmonizer, name).weight
+                if weight.grad is not None:
+                    mean_abs = weight.grad.abs().mean().item()
+                    grad_lines.append(f"  {name}={mean_abs:.6e}")
+            if grad_lines:
+                print("[Harmonizer Grad]")
+                for line in grad_lines:
+                    print(line)
+
+        # Save LoRA weights (and harmonizer if enabled) at specified intervals
         if (self.total_steps % self.save_interval == 0 or self.total_steps == 1) and self.total_steps < 15500:
             print(
                 f"Epoch: {trainer.current_epoch}, Steps: {self.total_steps} - Saving LoRA weights"
             )
-            pl_module.save_lora(
-                f"{self.save_path}/{self.run_name}/ckpt/{self.total_steps}"
-            )
+            ckpt_dir = f"{self.save_path}/{self.run_name}/ckpt/{self.total_steps}"
+            pl_module.save_lora(ckpt_dir)
+            pl_module.save_harmonizer(ckpt_dir)
 
         # Generate and save a sample image at specified intervals   or self.total_steps == 1
         if self.total_steps % self.sample_interval == 0 or self.total_steps == 1:
@@ -338,11 +402,9 @@ class TrainingCallback(L.Callback):
                 else:
                     print(f"No mask for {source_image_filename}, skipping.")
                     
-        # replace test_dir with the path to your test directory, like data/test/garment
-        test_dir = "path/to/test"
-        
-        if os.path.exists(test_dir):
-            final_inference(test_dir)
+        # test_dir = "/data1/stage/navsim_workspace/AnyInsertion/data_training_mask_prompt/test/person"
+        # if os.path.exists(test_dir):
+        #     final_inference(test_dir)
 
         
 

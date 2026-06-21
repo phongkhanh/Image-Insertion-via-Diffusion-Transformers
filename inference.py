@@ -6,22 +6,43 @@ import cv2
 from diffusers import FluxFillPipeline, FluxPriorReduxPipeline
 from utils.utils import get_bbox_from_mask, expand_bbox, pad_to_square, box2squre, crop_back, expand_image_mask
 
-device = torch.device(f"cuda")
+device = torch.device(f"cuda:3")
 dtype = torch.bfloat16
 size = (768, 768)
 
 # Load the pre-trained model and LoRA weights
 # Please replace the paths with your own paths
 pipe = FluxFillPipeline.from_pretrained(
-    "/path/to/black-forest-labs-FLUX.1-Fill-dev",
+    "checkpoint/FLUX.1-Fill-dev",
     torch_dtype=dtype
 )
 
-pipe.load_lora_weights(
-    "/path/to/lora"
-)
+LORA_PATH = "checkpoint/20250321_steps5000_pytorch_lora_weights.safetensors"
+pipe.load_lora_weights(LORA_PATH)
 
-redux = FluxPriorReduxPipeline.from_pretrained("/path/to/black-forest-labs-FLUX.1-Redux-dev").to(dtype=dtype)
+# ── Harmonizer inference patch ────────────────────────────────────────────────
+# Loads harmonizer.pt from the same directory as the LoRA weights and replaces
+# pipe.transformer.forward so the denoising loop follows the V2 training path:
+#   x_embedder → context_embedder → dual blocks → [harmonize @6,12,18] → single blocks
+# If harmonizer.pt is absent the pipeline runs as baseline (no patch applied).
+from src.models.harmonizer import MultiStageHarmonizer
+from src.models.transformer import build_inference_forward
+
+_ckpt_dir = LORA_PATH if os.path.isdir(LORA_PATH) \
+            else os.path.dirname(os.path.abspath(LORA_PATH))
+_harmonizer_path = os.path.join("runs/20260603-184948/ckpt/final/harmonizer.pt")
+
+if os.path.isfile(_harmonizer_path):
+    _harmonizer = MultiStageHarmonizer.load_for_inference(
+        _harmonizer_path, device, dtype
+    )
+    pipe.transformer.forward = build_inference_forward(pipe.transformer, _harmonizer)
+    print(f"[Harmonizer] Loaded from {_harmonizer_path}")
+    print("[Harmonizer] Inference patch active")
+else:
+    print(f"[Harmonizer] harmonizer.pt not found at {_harmonizer_path} — baseline mode")
+
+redux = FluxPriorReduxPipeline.from_pretrained("checkpoint/FLUX.1-Redux-dev").to(dtype=dtype)
 
 # If you want to reduce GPU memory usage, please comment out the following two lines and uncomment the next three lines.
 pipe.to(device)
@@ -35,11 +56,11 @@ redux.to(device)
 
 # Load the source and reference images and masks
 # Please replace the paths with your own image and mask paths
-source_image_path = "examples/source_image/1.png"
-mask_image_path = "examples/source_mask/1.png"
+source_image_path = "examples/source_image/4.png"
+mask_image_path = "examples/source_mask/4.png"
 
-ref_image_path = "examples/ref_image/1.png"
-ref_mask_path = "examples/ref_mask/1.png"
+ref_image_path = "examples/ref_image/4.png"
+ref_mask_path = "examples/ref_mask/4.png"
 
 # Load the images and masks
 ref_image = cv2.imread(ref_image_path)
@@ -134,7 +155,7 @@ for seed in seeds:
     ref_without_ext = os.path.splitext(ref_with_ext)[0]
     tar_without_ext = os.path.splitext(tar_with_ext)[0]
     
-    save_path = "./result"
+    save_path = "./result_1"
     os.makedirs(save_path, exist_ok=True)
     edited_image_save_path = os.path.join(save_path, f"{ref_without_ext}_to_{tar_without_ext}_seed{seed}.png")
     edited_image.save(edited_image_save_path)

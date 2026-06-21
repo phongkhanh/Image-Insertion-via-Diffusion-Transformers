@@ -10,23 +10,24 @@ from .base import BaseDataset
 
 
 class AllDataset(BaseDataset):
-    def __init__(self, image_dir, data_type="noperson"):
+    def __init__(self, image_dir, data_type="noperson", max_samples=None):
         super().__init__()
-        self.image_root = image_dir 
+        self.image_root = image_dir
         self.size = (768,768)
         self.data_type = data_type
+        all_files = sorted(os.listdir(os.path.join(image_dir, "ref_mask")))
+        self.data = all_files[:max_samples] if max_samples else all_files
 
 
     def __len__(self):
-        return len(os.listdir(os.path.join(self.image_root, "ref_mask")))
+        return len(self.data)
 
-            
+
     def get_sample(self, idx):
 
         ref_masks_path = os.path.join(self.image_root, "ref_mask")
-        data = os.listdir(ref_masks_path)
 
-        ref_mask_path = os.path.join(self.image_root, "ref_mask", data[idx])
+        ref_mask_path = os.path.join(self.image_root, "ref_mask", self.data[idx])
         tar_image_path = ref_mask_path.replace('/ref_mask/', '/tar_image/')
         ref_image_path = ref_mask_path.replace('/ref_mask/','/ref_image/')
         tar_mask_path = ref_mask_path.replace('/ref_mask/', '/tar_mask/')
