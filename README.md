@@ -66,6 +66,10 @@ Key training options in the config:
 - `model.lora_config.r` — LoRA rank (default 256)
 - Optimizer: Prodigy with bias correction
 
+## Contributors
+
+- [phongkhanh](https://github.com/phongkhanh)
+
 ## Credits
 
 This project builds on:
