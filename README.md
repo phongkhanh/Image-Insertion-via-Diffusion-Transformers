@@ -73,6 +73,6 @@ Key training options in the config:
 ## Credits
 
 This project builds on:
-- [Insert Anything](https://github.com/song-wensong/insert-anything) by Wensong Song et al. (AAAI 2026)
+- [Insert Anything](https://github.com/song-wensong/insert-anything) (AAAI 2026)
 - [FLUX.1](https://github.com/black-forest-labs/flux) by Black Forest Labs
 - [AnyInsertion dataset](https://huggingface.co/datasets/WensongSong/AnyInsertion_V1)
